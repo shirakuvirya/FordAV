@@ -1,9 +1,20 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.5)
 project(ford_demo)
 
-find_package(catkin REQUIRED)
+find_package(ament_cmake REQUIRED)
 
-catkin_package()
+# If you have C++ targets, uncomment and adjust:
+# find_package(rclcpp REQUIRED)
+# find_package(sensor_msgs REQUIRED)
 
-include_directories(include ${catkin_INCLUDE_DIRS} ${SDFormat_INCLUDE_DIRS})
+# Add include directories (if needed)
+# include_directories(include ${SDFormat_INCLUDE_DIRS})
 
+install(DIRECTORY
+  launch
+  rviz
+  params
+  DESTINATION share/${PROJECT_NAME}
+)
+
+ament_package()

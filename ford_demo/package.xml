@@ -1,21 +1,31 @@
-<package format="2">
+<?xml version="1.0"?>
+<package format="3">
   <name>ford_demo</name>
   <version>1.0.0</version>
   <description>
-  This package contains the relevant launch files, tools, rviz plugins, scripts
-  for Ford data release
+    This package contains the relevant launch files, tools, RViz plugins, and scripts
+    for the Ford data release.
   </description>
+
   <author>Ankit Vora</author>
   <author>Siddharth Agarwal</author>
   <maintainer email="avora3@ford.com">Ankit Vora</maintainer>
   <maintainer email="sagarw20@ford.com">Siddharth Agarwal</maintainer>
-  <license>BSD</license>
-  <buildtool_depend>catkin</buildtool_depend>
+  <maintainer email="shivaram.jagannathan@outlook.com">Shivaram Kumar</maintainer>
 
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Runtime dependencies -->
   <exec_depend>fusion_description</exec_depend>
-  <exec_depend>rospy</exec_depend>
-  <exec_depend>rviz</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rviz2</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>velodyne_pointcloud</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

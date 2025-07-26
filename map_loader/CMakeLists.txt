@@ -1,40 +1,36 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.5)
 project(map_loader)
 
-include(FindPkgConfig)
-find_package(catkin REQUIRED COMPONENTS
-  roscpp
-  std_msgs
-  pcl_conversions
-)
-find_package(PCL 1.7 REQUIRED COMPONENTS io)
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(PCL REQUIRED COMPONENTS io)
+find_package(Eigen3 REQUIRED)
 
-pkg_check_modules(EIGEN3 REQUIRED eigen3)
-
-set(CMAKE_CXX_FLAGS "-std=c++11 -O2 -Wall ${CMAKE_CXX_FLAGS}")
-ADD_COMPILE_OPTIONS(-std=c++11 )
-ADD_COMPILE_OPTIONS(-std=c++14 )
-
-catkin_package(
-#  INCLUDE_DIRS include
-#  LIBRARIES fake_drivers
-   CATKIN_DEPENDS std_msgs
-#  DEPENDS system_lib
-)
-
-###########
-## Build ##
-###########
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_FLAGS "-O2 -Wall ${CMAKE_CXX_FLAGS}")
 
 include_directories(
   include
-  ${catkin_INCLUDE_DIRS}
-  ${PCL_IO_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIRS}
 )
 
 add_executable(reflectivity_map_loader src/reflectivity_map_loader.cpp)
-add_executable(point_cloud_map_loader src/point_cloud_map_loader.cpp)
+ament_target_dependencies(reflectivity_map_loader rclcpp std_msgs sensor_msgs)
 
-target_link_libraries(reflectivity_map_loader ${catkin_LIBRARIES} ${PCL_IO_LIBRARIES})
-target_link_libraries(point_cloud_map_loader ${catkin_LIBRARIES} ${PCL_IO_LIBRARIES})
+add_executable(point_cloud_map_loader src/point_cloud_map_loader.cpp)
+ament_target_dependencies(point_cloud_map_loader rclcpp std_msgs sensor_msgs)
+
+target_link_libraries(reflectivity_map_loader ${PCL_LIBRARIES})
+target_link_libraries(point_cloud_map_loader ${PCL_LIBRARIES})
+
+install(TARGETS
+  reflectivity_map_loader
+  point_cloud_map_loader
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_package()
