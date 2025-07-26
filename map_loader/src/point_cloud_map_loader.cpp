@@ -1,301 +1,278 @@
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
-#include <queue>
-#include <thread>
-#include <math.h>
 #include <dirent.h>
+#include <functional>
+#include <memory>
+#include <queue>
+#include <string>
+#include <thread>
+#include <vector>
 
-#include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <pcl/io/pcd_io.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <std_msgs/Bool.h>
-#include <tf/transform_listener.h>
-
 #include <Eigen/Core>
 
-namespace {
+using namespace std::chrono_literals;
 
-struct tile {
-	std::string path;
-	float origin_x;
-	float origin_y;
-	int id;
-	std::vector<tile*> neighbors;
+//----------------------------------------
+// Helper struct & functions
+//----------------------------------------
+struct Tile
+{
+  std::string path;
+  float origin_x;
+  float origin_y;
+  int id;
+  std::vector<Tile*> neighbors;
 };
 
-bool checkNeighbor(tile i, tile j, float thresh)
+bool checkNeighbor(const Tile &a, const Tile &b, float thresh)
 {
-	float dist = abs(i.origin_x - j.origin_x) + abs(i.origin_y - j.origin_y);
-	return dist <= thresh;
+  float dist = std::abs(a.origin_x - b.origin_x)
+             + std::abs(a.origin_y - b.origin_y);
+  return dist <= thresh;
 }
 
-class PointCloudMapLoader {
-private:
-	ros::NodeHandle& nodeHandle_;
-	ros::Publisher pcdPublisher_;
-	ros::Subscriber poseSubscriber_;
-	Eigen::Vector3d pose_;
-	pcl::PointCloud<pcl::PointXYZRGB> cloudFull_;
-	std::string pcdPublishTopic_;
-	std::string poseSubscribeTopic_;
-	double visibilityRadius_;
-	std::vector<tile> allTiles_;
-	bool poseAvailable_;
-	float neighborDist_;
-	float publishRate_;
+bool getFileNames(const std::string &folderPath,
+                  std::vector<std::string> &pcdPaths)
+{
+  DIR *dirp = opendir(folderPath.c_str());
+  if (!dirp) {
+    perror("Cannot open dir");
+    return false;
+  }
+  struct dirent *dp;
+  while ((dp = readdir(dirp)) != nullptr) {
+    std::string name = dp->d_name;
+    if (name.size() > 4 && name.substr(name.size() - 4) == ".pcd") {
+      pcdPaths.push_back(folderPath + "/" + name);
+    }
+  }
+  closedir(dirp);
+  return true;
+}
 
+//----------------------------------------
+// PointCloudMapLoader
+//----------------------------------------
+class PointCloudMapLoader
+  : public std::enable_shared_from_this<PointCloudMapLoader>
+{
 public:
-	PointCloudMapLoader(ros::NodeHandle &nodeHandle);
-	~PointCloudMapLoader();
-	void readParameters();
-	void createPcd(const std::vector<std::string>& pcdPaths);
-	void publishPcd (sensor_msgs::PointCloud2 &cloud);
-	void poseCallback(const geometry_msgs::PoseStamped &msg);
-	void getPoseTile();
-	double computeDist(Eigen::Vector3d p, Eigen::Vector3d q);
-	void createTiles(std::vector<std::string> pcdPaths);
-	void getTileCenters(std::string path, float &x, float &y);
-	void computeNeighbors();
-	bool onTile(Eigen::Vector3d pose, tile t);
-	void managePcdPublish(tile t);
-	void getPublishRate(float &rate);
+  explicit PointCloudMapLoader(rclcpp::Node::SharedPtr node)
+  : node_(node), pose_available_(false)
+  {
+    readParameters();
+    setupCommunication();
+    createTilesFromFolder();
+    computeNeighbors();
+  }
+
+private:
+  // ROS node handle
+  rclcpp::Node::SharedPtr node_;
+
+  // Publisher & Subscriber
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pcd_publisher_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
+
+  // Timer for periodic map publishing
+  rclcpp::TimerBase::SharedPtr timer_;
+
+  // Internal state
+  Eigen::Vector3d current_pose_;
+  bool pose_available_{false};
+  std::string map_folder_;
+  std::string pcd_topic_;
+  std::string pose_topic_;
+  float neighbor_dist_{128.0f};
+  float publish_rate_{1.0f};
+
+  std::vector<Tile> all_tiles_;
+
+  //--------------------------------------
+  // Read params from parameter server
+  //--------------------------------------
+  void readParameters()
+  {
+    node_->declare_parameter<std::string>("map_folder", "");
+    node_->declare_parameter<std::string>("pcd_topic", "/pointcloud_map");
+    node_->declare_parameter<std::string>("pose_topic", "/pose_ground_truth");
+    node_->declare_parameter<float>("neighbor_dist", 128.0f);
+    node_->declare_parameter<float>("publish_rate", 1.0f);
+
+    node_->get_parameter("map_folder", map_folder_);
+    node_->get_parameter("pcd_topic", pcd_topic_);
+    node_->get_parameter("pose_topic", pose_topic_);
+    node_->get_parameter("neighbor_dist", neighbor_dist_);
+    node_->get_parameter("publish_rate", publish_rate_);
+  }
+
+  //--------------------------------------
+  // Setup publisher, subscriber, and timer
+  //--------------------------------------
+  void setupCommunication()
+  {
+    // Publisher
+    pcd_publisher_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+      pcd_topic_, rclcpp::QoS(10));
+
+    // Subscriber
+    pose_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
+      pose_topic_, rclcpp::QoS(10),
+      std::bind(&PointCloudMapLoader::poseCallback, this, std::placeholders::_1));
+
+    // Timer: call getPoseTile() at publish_rate_ Hz
+    auto period = std::chrono::duration<float>(1.0f / publish_rate_);
+    timer_ = node_->create_wall_timer(
+      std::chrono::duration_cast<std::chrono::milliseconds>(period),
+      std::bind(&PointCloudMapLoader::getPoseTile, this));
+  }
+
+  //--------------------------------------
+  // Callback: update current pose
+  //--------------------------------------
+  void poseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+  {
+    current_pose_(0) = msg->pose.position.x;
+    current_pose_(1) = msg->pose.position.y;
+    current_pose_(2) = msg->pose.position.z;
+    pose_available_ = true;
+  }
+
+  //--------------------------------------
+  // Build tile list from map_folder_
+  //--------------------------------------
+  void createTilesFromFolder()
+  {
+    std::vector<std::string> pcdPaths;
+    if (!getFileNames(map_folder_, pcdPaths)) {
+      RCLCPP_ERROR(node_->get_logger(), "Failed to read PCD files from '%s'", map_folder_.c_str());
+      rclcpp::shutdown();
+      return;
+    }
+    int id_counter = 0;
+    for (const auto &path : pcdPaths) {
+      // extract tile center from filename, e.g. "12_34.pcd"
+      float x, y;
+      parseTileCenter(path, x, y);
+      Tile t;
+      t.path = path;
+      t.origin_x = x;
+      t.origin_y = y;
+      t.id = id_counter++;
+      all_tiles_.push_back(t);
+    }
+    RCLCPP_INFO(node_->get_logger(), "Loaded %zu tiles", all_tiles_.size());
+  }
+
+  //--------------------------------------
+  // Compute neighbor relationships
+  //--------------------------------------
+  void computeNeighbors()
+  {
+    for (auto &ti : all_tiles_) {
+      for (auto &tj : all_tiles_) {
+        if (checkNeighbor(ti, tj, neighbor_dist_)) {
+          ti.neighbors.push_back(&tj);
+        }
+      }
+    }
+  }
+
+  //--------------------------------------
+  // Periodic: find current tile & publish
+  //--------------------------------------
+  void getPoseTile()
+  {
+    if (!pose_available_) {
+      RCLCPP_INFO(node_->get_logger(), "Waiting for pose...");
+      return;
+    }
+    for (auto &t : all_tiles_) {
+      if (onTile(current_pose_, t)) {
+        publishNeighborTiles(t);
+        return;
+      }
+    }
+  }
+
+  //--------------------------------------
+  // Publish PCDs of neighbors of tile t
+  //--------------------------------------
+  void publishNeighborTiles(const Tile &t)
+  {
+    std::vector<std::string> paths;
+    for (auto *nbr : t.neighbors) {
+      paths.push_back(nbr->path);
+    }
+    RCLCPP_INFO(node_->get_logger(), "Publishing %zu neighbor tiles", paths.size());
+    sensor_msgs::msg::PointCloud2 full_cloud, part_cloud;
+    for (const auto &p : paths) {
+      if (full_cloud.width == 0) {
+        pcl::io::loadPCDFile(p, full_cloud);
+      } else {
+        pcl::io::loadPCDFile(p, part_cloud);
+        full_cloud.width    += part_cloud.width;
+        full_cloud.row_step += part_cloud.row_step;
+        full_cloud.data.insert(full_cloud.data.end(),
+                               part_cloud.data.begin(),
+                               part_cloud.data.end());
+      }
+      if (!rclcpp::ok()) return;
+    }
+    full_cloud.header.frame_id = "map";
+    full_cloud.header.stamp = node_->now();
+    pcd_publisher_->publish(full_cloud);
+  }
+
+  //--------------------------------------
+  // Check if pose lies within tile t
+  //--------------------------------------
+  bool onTile(const Eigen::Vector3d &pose, const Tile &t)
+  {
+    return (pose(0) > t.origin_x &&
+            pose(1) > t.origin_y &&
+            pose(0) < t.origin_x + 64.0f &&
+            pose(1) < t.origin_y + 64.0f);
+  }
+
+  //--------------------------------------
+  // Extract x,y from filename "x_y.pcd"
+  //--------------------------------------
+  void parseTileCenter(const std::string &path, float &x, float &y)
+  {
+    auto slash = path.find_last_of('/');
+    std::string name = path.substr(slash + 1);
+    auto underscore = name.find('_');
+    auto dot        = name.find('.');
+    x = std::stof(name.substr(0, underscore));
+    y = std::stof(name.substr(underscore + 1, dot - underscore - 1));
+  }
 };
 
-PointCloudMapLoader::PointCloudMapLoader(ros::NodeHandle &nodeHandle)
-	:nodeHandle_(nodeHandle),
-	poseAvailable_(0)
-{
-	readParameters();
-	poseSubscriber_ = nodeHandle_.subscribe(poseSubscribeTopic_, 500, &PointCloudMapLoader::poseCallback, this);
-	pcdPublisher_ = nodeHandle_.advertise<sensor_msgs::PointCloud2>(pcdPublishTopic_, publishRate_);
-}
-
-PointCloudMapLoader::~PointCloudMapLoader()
-{
-
-}
-
-void PointCloudMapLoader::readParameters()
-{
-  nodeHandle_.param("pcd_topic", pcdPublishTopic_, std::string("/pointcloud_map"));
-  nodeHandle_.param("pose_topic", poseSubscribeTopic_, std::string("/pose_ground_truth"));
-	nodeHandle_.param("neighbor_dist", neighborDist_, (float)128.0); // factor of 64
-	nodeHandle_.param("publish_rate", publishRate_, (float)1.0); // factor of 64
-}
-
-void PointCloudMapLoader::poseCallback(const geometry_msgs::PoseStamped &msg)
-{
-	pose_(0) = msg.pose.position.x;
-	pose_(1) = msg.pose.position.y;
-	pose_(2) = msg.pose.position.z;
-	poseAvailable_ = 1;
-}
-
-void PointCloudMapLoader::createPcd(const std::vector<std::string>& pcdPaths)
-{
-	sensor_msgs::PointCloud2 pcdFull, pcdPart;
-	for (const std::string& path : pcdPaths) {
-		if (pcdFull.width == 0) {
-			if (pcl::io::loadPCDFile(path.c_str(), pcdFull) == -1) {
-			}
-		} else {
-			if (pcl::io::loadPCDFile(path.c_str(), pcdPart) == -1) {
-			}
-			pcdFull.width += pcdPart.width;
-			pcdFull.row_step += pcdPart.row_step;
-			pcdFull.data.insert(pcdFull.data.end(), pcdPart.data.begin(), pcdPart.data.end());
-		}
-		if (!ros::ok()) break;
-	}
-
-	publishPcd(pcdFull);
-}
-
-void PointCloudMapLoader::getPoseTile()
-{
-
-	// find which tile is the vehicle in
-	if (poseAvailable_)
-	{
-		Eigen::Vector3d currentPose(pose_);
-		for (std::vector<tile>::iterator i = allTiles_.begin(); i != allTiles_.end(); i++)
-		{
-			bool isInside = onTile(currentPose, *i);
-			if (isInside)
-			{
-				managePcdPublish(*i);
-				return;
-			}
-		}
-	}
-	ROS_INFO("Waiting for pose");
-	return;
-}
-
-void PointCloudMapLoader::managePcdPublish(tile t)
-{
-	std::vector<std::string> toBeLoaded;
-	std::vector<int> currentlyLoaded_;
-
-	// Load the neighbors
-	for (std::vector<tile*>::iterator i = t.neighbors.begin(); i != t.neighbors.end(); i++)
-	{
-		currentlyLoaded_.push_back((*i)->id);
-		toBeLoaded.push_back((*i)->path);
-	}
-
-	ROS_INFO("Loading %d tiles",(int)toBeLoaded.size());
-	createPcd(toBeLoaded);
-}
-
-void PointCloudMapLoader::publishPcd(sensor_msgs::PointCloud2 &pcd)
-{
-	if (pcd.width != 0) {
-		pcd.header.frame_id = "map";
-		pcdPublisher_.publish(pcd);
-	}
-}
-
-double PointCloudMapLoader::computeDist(Eigen::Vector3d p, Eigen::Vector3d q)
-{
-	double dist = sqrt(pow(p(0) - q(0), 2) +
-										 pow(p(1) - q(1), 2));
-	return dist;
-}
-
-void PointCloudMapLoader::getTileCenters(std::string path, float &x, float &y)
-{
-	std::string splitPath;
-	std::vector<size_t> vec;
-	size_t pos = path.find('/');
-	while (pos != std::string::npos)
-	{
-		vec.push_back(pos);
-		pos = path.find('/', pos + 1);
-	}
-	pos = vec.back();
-	std::string filename = path.substr(pos + 1, path.find('.'));
-	pos = filename.find('_');
-	size_t pos_end = filename.find('.');
-	std::string x1 = filename.substr(0,pos);
-	std::string y1 = filename.substr(pos+1,pos_end - pos -1);
-	x = std::stof(x1);
-	y = std::stof(y1);
-}
-
-void PointCloudMapLoader::createTiles(std::vector<std::string> pcdPaths)
-{
-	int id_counter = 0;
-	for (std::vector<std::string>::iterator i = pcdPaths.begin(); i != pcdPaths.end(); i++)
-	{
-		float x,y;
-		getTileCenters(*i, x, y);
-		tile newTile;
-		newTile.origin_x = x;
-		newTile.origin_y = y;
-		newTile.path = *i;
-		newTile.id = id_counter;
-		allTiles_.push_back(newTile);
-		id_counter++;
-	}
-	ROS_INFO("Total number of tiles added are %d",(int)allTiles_.size());
-}
-
-void PointCloudMapLoader::computeNeighbors()
-{
-	for (std::vector<tile>::iterator i = allTiles_.begin(); i != allTiles_.end(); i++)
-	{
-		for (std::vector<tile>::iterator j = allTiles_.begin(); j != allTiles_.end(); j++)
-		{
-			bool isNeighbor = checkNeighbor(*i, *j, neighborDist_);
-			if (isNeighbor)
-			{
-				i->neighbors.push_back(&(*j));
-			}
-
-		}
-	}
-}
-
-bool PointCloudMapLoader::onTile(Eigen::Vector3d pose, tile t)
-{
-	float pos_x = (float)pose(0);
-	float pos_y = (float)pose(1);
-	return (pos_x > t.origin_x && pos_y > t.origin_y &&
-					pos_x < t.origin_x + 64.0 && pos_y < t.origin_y + 64);
-}
-
-void PointCloudMapLoader::getPublishRate(float &rate)
-{
-	rate = publishRate_;
-	return;
-}
-
-bool getFileNames(std::string folderPath, std::vector<std::string> &pcdPaths)
-{
-	DIR* dirp = opendir(folderPath.c_str());
-	struct dirent * dp;
-	if (dirp != NULL) {
-		while ((dp = readdir(dirp)) != NULL) {
-
-			// only add pcd files
-			std::size_t type = std::string(dp->d_name).find(".pcd");
-			if (type != std::string::npos) {
-				pcdPaths.push_back(folderPath + std::string(dp->d_name));
-			}
-		}
-		closedir(dirp);
-	} else {
-		/* could not open directory */
-  	perror ("Cannot open dir");
-  	return EXIT_FAILURE;
-	}
-	return EXIT_SUCCESS;
-}
-
-
-
-void print_usage()
-{
-	ROS_ERROR_STREAM("Usage:");
-	ROS_ERROR_STREAM("rosrun map_loader point_cloud_map_loader point_cloud_map_folder");
-}
-
-
-
-} // namespace
-
+//----------------------------------------
+// Main
+//----------------------------------------
 int main(int argc, char **argv)
 {
-	ros::init(argc, argv, "point_cloud_map_loader");
-	ros::NodeHandle nh("~");
-	if (argc < 2 || (argc == 2 && std::string(argv[1]) == "-h")) {
-		print_usage();
-		return EXIT_FAILURE;
-	}
+  rclcpp::init(argc, argv);
 
-	std::string folderPath("");
-	if (argc == 2){
-		folderPath = std::string(argv[1]);
-	}
+  auto node = rclcpp::Node::make_shared("point_cloud_map_loader");
+  // The first CLI arg is the map folder
+  if (argc < 2) {
+    RCLCPP_ERROR(node->get_logger(), "Usage: point_cloud_map_loader <map_folder>");
+    return 1;
+  }
+  // Pass map_folder as parameter
+  node->set_parameter(rclcpp::Parameter("map_folder", std::string(argv[1])));
 
-	PointCloudMapLoader pointCloudMapLoader(nh);
-	std::vector<std::string> pcdPaths;
-
-	if (!getFileNames(folderPath, pcdPaths)) {
-		pointCloudMapLoader.createTiles(pcdPaths);
-		pointCloudMapLoader.computeNeighbors();
-
-		float publishRate;
-		pointCloudMapLoader.getPublishRate(publishRate);
-		ros::Rate rate(publishRate);
-		while (ros::ok())
-		{
-			pointCloudMapLoader.getPoseTile();
-			ros::spinOnce();
-			rate.sleep();
-		}
-	} else {
-		return EXIT_FAILURE;
-	}
-
-	return 0;
+  auto loader = std::make_shared<PointCloudMapLoader>(node);
+  rclcpp::spin(node);
+  rclcpp::shutdown();
+  return 0;
 }
