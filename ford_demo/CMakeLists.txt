@@ -19,6 +19,7 @@ install(DIRECTORY
 
 install(PROGRAMS
   scripts/lidar_merger.py
+  scripts/lidar_merger_v2.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

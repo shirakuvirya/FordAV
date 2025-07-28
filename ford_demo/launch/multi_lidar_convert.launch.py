@@ -69,7 +69,7 @@ def generate_launch_description():
                     'max_range':     max_range,
                     'min_range':     min_range,
                     'fixed_frame':   f'lidar_{color}',
-                    'target_frame':  'map',
+                    'target_frame':  'body',
                     'model':         model
                 }],
                 remappings=[
