@@ -1,64 +1,87 @@
+#!/usr/bin/env python3
+import os
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-import os
-
+from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    # Declare arguments
+    # 1) Declare arguments
     calibration = LaunchConfiguration('calibration')
-    manager = LaunchConfiguration('manager')
-    max_range = LaunchConfiguration('max_range')
-    min_range = LaunchConfiguration('min_range')
-    model = LaunchConfiguration('model')
+    max_range   = LaunchConfiguration('max_range')
+    min_range   = LaunchConfiguration('min_range')
+    model       = LaunchConfiguration('model')
+
+    ford_demo_share = get_package_share_directory('ford_demo')
+    fusion_share    = get_package_share_directory('fusion_description')
 
     declare_args = [
         DeclareLaunchArgument(
             'calibration',
             default_value=os.path.join(
-                get_package_share_directory('ford_demo'),
-                'params', 'lidarIntrinsics.yaml'
+                ford_demo_share, 'params', 'lidarIntrinsics.yaml'
             ),
-            description='Calibration file for Velodyne sensors'
+            description='Calibration YAML for Velodyne sensors'
         ),
-        DeclareLaunchArgument('manager', default_value='velodyne_nodelet_manager'),
         DeclareLaunchArgument('max_range', default_value='130.0'),
         DeclareLaunchArgument('min_range', default_value='3.0'),
-        DeclareLaunchArgument('model', default_value='32E')
+        DeclareLaunchArgument('model', default_value='32E'),
     ]
 
-    # In ROS 2, Nodelets are converted to regular nodes (usually within velodyne_pointcloud)
-    # We'll directly call the 'velodyne_transform_node' executable for each sensor
+    # ────────────────────────────────────────────────────────────────
+    # 2) URDF loader: read fusion.urdf and publish TF tree
+    urdf_path = os.path.join(fusion_share, 'urdf', 'fusion.urdf')
+    # Read the URDF XML directly (no xacro)
+    with open(urdf_path, 'r') as inf:
+        robot_description_xml = inf.read()
+
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        name='robot_state_publisher',
+        output='screen',
+        parameters=[{
+            'robot_description': robot_description_xml
+        }]
+    )
+    # ────────────────────────────────────────────────────────────────
+
+    # 3) Velodyne transform nodes
+    lidar_config = [
+        ('red',    'lidar_red_scan',    'lidar_red_pointcloud'),
+        ('yellow', 'lidar_yellow_scan', 'lidar_yellow_pointcloud'),
+        ('blue',   'lidar_blue_scan',   'lidar_blue_pointcloud'),
+        ('green',  'lidar_green_scan',  'lidar_green_pointcloud'),
+    ]
 
     lidar_nodes = []
-    lidar_config = [
-        ('red', 'lidar_red_scan', 'lidar_red_pointcloud'),
-        ('yellow', 'lidar_yellow_scan', 'lidar_yellow_pointcloud'),
-        ('blue', 'lidar_blue_scan', 'lidar_blue_pointcloud'),
-        ('green', 'lidar_green_scan', 'lidar_green_pointcloud'),
-    ]
-
-    for color, scan_topic, pointcloud_topic in lidar_config:
+    for color, scan_topic, pc_topic in lidar_config:
         lidar_nodes.append(
             Node(
                 package='velodyne_pointcloud',
-                executable='velodyne_transform_node',  # Nodelet replaced with executable
+                executable='velodyne_transform_node',
                 name=f'velodyne_{color}_convert',
+                output='screen',
                 parameters=[{
-                    'calibration': calibration,
-                    'max_range': max_range,
-                    'min_range': min_range,
-                    'fixed_frame': f'lidar_{color}',
-                    'target_frame': f'lidar_{color}',
-                    'model': model
+                    'calibration':   calibration,
+                    'max_range':     max_range,
+                    'min_range':     min_range,
+                    'fixed_frame':   f'lidar_{color}',
+                    'target_frame':  'map',
+                    'model':         model
                 }],
                 remappings=[
                     ('velodyne_packets', scan_topic),
-                    ('velodyne_points', pointcloud_topic)
+                    ('velodyne_points',  pc_topic),
                 ],
-                output='screen'
             )
         )
 
-    return LaunchDescription(declare_args + lidar_nodes)
+    # 4) Assemble & return
+    return LaunchDescription(
+        declare_args
+        + [robot_state_publisher]
+        + lidar_nodes
+    )
