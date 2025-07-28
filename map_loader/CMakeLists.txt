@@ -20,10 +20,10 @@ include_directories(
 )
 
 add_executable(reflectivity_map_loader src/reflectivity_map_loader.cpp)
-ament_target_dependencies(reflectivity_map_loader rclcpp std_msgs sensor_msgs pcl_conversions)
+ament_target_dependencies(reflectivity_map_loader geometry_msgs rclcpp std_msgs sensor_msgs pcl_conversions)
 
 add_executable(point_cloud_map_loader src/point_cloud_map_loader.cpp)
-ament_target_dependencies(point_cloud_map_loader rclcpp std_msgs sensor_msgs pcl_conversions)
+ament_target_dependencies(point_cloud_map_loader geometry_msgs rclcpp std_msgs sensor_msgs pcl_conversions)
 
 target_link_libraries(reflectivity_map_loader ${PCL_LIBRARIES})
 target_link_libraries(point_cloud_map_loader ${PCL_LIBRARIES})
