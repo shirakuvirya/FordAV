@@ -20,6 +20,8 @@ install(DIRECTORY
 install(PROGRAMS
   scripts/lidar_merger.py
   scripts/lidar_merger_v2.py
+  scripts/extrinsics_broadcast.sh 
+  scripts/extrinsics_broadcaster.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

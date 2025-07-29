@@ -33,7 +33,6 @@ def generate_launch_description():
     # ────────────────────────────────────────────────────────────────
     # 2) URDF loader: read fusion.urdf and publish TF tree
     urdf_path = os.path.join(fusion_share, 'urdf', 'fusion.urdf')
-    # Read the URDF XML directly (no xacro)
     with open(urdf_path, 'r') as inf:
         robot_description_xml = inf.read()
 
@@ -43,7 +42,8 @@ def generate_launch_description():
         name='robot_state_publisher',
         output='screen',
         parameters=[{
-            'robot_description': robot_description_xml
+            'robot_description': robot_description_xml,
+            'use_sim_time': True,  # Use simulation time if available
         }]
     )
     # ────────────────────────────────────────────────────────────────
@@ -70,7 +70,9 @@ def generate_launch_description():
                     'min_range':     min_range,
                     'fixed_frame':   f'lidar_{color}',
                     'target_frame':  'body',
-                    'model':         model
+                    'model':         model,
+                    # tell the node to use ROS‑2’s sensor QoS (best_effort, small queue)
+                    #'use_sensor_qos': True,
                 }],
                 remappings=[
                     ('velodyne_packets', scan_topic),
@@ -79,7 +81,6 @@ def generate_launch_description():
             )
         )
 
-    # 4) Assemble & return
     return LaunchDescription(
         declare_args
         + [robot_state_publisher]
